@@ -21,6 +21,9 @@ MAX_SEGMENTS_PER_BATCH = 40
 # 引擎版本: 参与缓存键, 升级提示词/模型时自动绕过旧缓存
 ENGINE_VERSION = "1"
 
+# 跨页上下文: 保留上一页译文末尾多少字, 维持人称/语气跨页连贯
+NOVEL_CONTEXT_CHARS = 500
+
 
 @dataclass
 class Settings:
@@ -44,6 +47,17 @@ class Settings:
     )
     cache_dir: str = field(
         default_factory=lambda: os.environ.get("WT_CACHE_DIR", "./data/cache")
+    )
+    novel_dir: str = field(
+        default_factory=lambda: os.environ.get("WT_NOVEL_DIR", "./data/novel")
+    )
+    # 润色: 小说场景默认开启; 可指向更强模型 / 外部 API
+    polish_enabled: bool = field(
+        default_factory=lambda: os.environ.get("WT_POLISH", "true").lower() != "false"
+    )
+    polish_model: str = field(
+        default_factory=lambda: os.environ.get("WT_POLISH_MODEL")
+        or os.environ.get("WT_LLM_MODEL", DEFAULT_MODEL)
     )
 
     @property

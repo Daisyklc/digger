@@ -91,3 +91,17 @@ def get_ocr() -> BaseOcr:
     # paddle / vision-llm 后端留作扩展
     logger.warning("OCR 后端 %s 未实现, 回退 manga-ocr", backend)
     return MangaOcrBackend()
+
+
+def read_page(image_bytes: bytes, source_lang: str = "ja", vertical: bool = True) -> str:
+    """整页 OCR: 按正确阅读顺序还原整页纯文本 (非按气泡)。
+
+    用于 Kindle 日文小说竖排位图。竖排阅读顺序为: 每列自上而下, 列序自右向左。
+
+    推荐后端: 多模态 vision-llm (对竖排与阅读顺序最稳) 或 PaddleOCR 竖排模式。
+    默认剥离 ルビ (振假名); 低置信时返回已识别部分。
+
+    TODO: 接入具体整页 OCR 后端; 当前为接口占位, 返回空串由上层决定兜底。
+    """
+    logger.info("read_page lang=%s vertical=%s bytes=%d", source_lang, vertical, len(image_bytes))
+    return ""

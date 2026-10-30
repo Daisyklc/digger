@@ -132,6 +132,96 @@
     setTimeout(() => (el.style.display = "none"), 4000);
   }
 
+  // ---- 小说模式: 适配器 + 两种阅读模式 ----------------------------------
+  function currentAdapter() {
+    const regs = window.__WT_ADAPTERS || {};
+    return regs.kindle || Object.values(regs)[0] || null;
+  }
+
+  function sendNovelPage(args) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: "translateNovelPage", payload: args }, (resp) => {
+        resolve(resp && resp.ok ? resp.data : null);
+      });
+    });
+  }
+
+  // 侧栏显示当前页译文 (手动实时模式)
+  function showPanel(text) {
+    let panel = document.getElementById("wt-novel-panel");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = "wt-novel-panel";
+      document.body.appendChild(panel);
+    }
+    panel.textContent = text;
+    panel.style.display = "block";
+  }
+
+  // 手动翻页 · 实时翻译: 翻译当前页, 并轮询页面指纹, 用户翻页后自动重译
+  async function runNovelRealtime(opts) {
+    const adapter = currentAdapter();
+    if (!adapter) return banner("当前站点暂无小说适配器");
+    window.__wtStop = false;
+    let lastFp = null;
+    let pageIndex = opts.startIndex || 0;
+
+    async function translateCurrent() {
+      if (window.__wtStop) return;
+      const cap = adapter.capturePage();
+      if (!cap || cap.kind === "empty" || cap.fingerprint === lastFp) return;
+      lastFp = cap.fingerprint;
+      showPanel("翻译中…");
+      const data = await sendNovelPage({
+        book: opts.book,
+        index: pageIndex++,
+        text: cap.text,
+        imageDataUrl: cap.imageDataUrl,
+        vertical: adapter.vertical,
+        polish: opts.polish,
+      });
+      if (data) showPanel(data.polished || data.translated);
+      else banner("翻译失败, 已保留原文");
+    }
+
+    await translateCurrent();
+    clearInterval(window.__wtNovelPoll);
+    window.__wtNovelPoll = setInterval(translateCurrent, 1200);
+    banner("实时翻译已开启, 翻页即自动翻译");
+  }
+
+  // 自动翻页 · 保存翻译: 连续自动翻页, 逐页翻译落盘, 到书末停止
+  async function runNovelAuto(opts) {
+    const adapter = currentAdapter();
+    if (!adapter) return banner("当前站点暂无小说适配器");
+    window.__wtStop = false;
+    banner("开始自动翻页保存…");
+    let prevFp = null;
+    const maxPages = opts.maxPages || 2000;
+    let done = 0;
+
+    for (let i = opts.startIndex || 0; i < maxPages; i++) {
+      if (window.__wtStop) { banner("已手动停止"); break; }
+      const cap = adapter.capturePage();
+      if (!cap || cap.kind === "empty") { banner("无可读内容, 停止"); break; }
+      if (cap.fingerprint === prevFp) { banner(`已到书末, 共保存 ${done} 页`); break; }
+      prevFp = cap.fingerprint;
+      const data = await sendNovelPage({
+        book: opts.book,
+        index: i,
+        text: cap.text,
+        imageDataUrl: cap.imageDataUrl,
+        vertical: adapter.vertical,
+        polish: opts.polish,
+      });
+      if (data) done += 1;
+      else banner(`第 ${i} 页失败, 继续`);
+      adapter.nextPage(opts.direction);
+      await new Promise((r) => setTimeout(r, opts.interval || 1500));
+    }
+    banner(`自动翻页完成, 可在弹窗导出 (${done} 页)`);
+  }
+
   // ---- 入口: 等待 popup 指令或自动运行 ----------------------------------
   function run(modeOverride) {
     const mode = modeOverride && modeOverride !== "auto" ? modeOverride : detectMode();
@@ -140,7 +230,27 @@
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg && msg.type === "wt-run") run(msg.mode);
+    if (!msg) return;
+    if (msg.type === "wt-run") {
+      if (msg.mode === "novel") {
+        const opts = {
+          book: msg.book,
+          polish: msg.polish,
+          direction: msg.direction,
+          interval: msg.interval,
+          maxPages: msg.maxPages,
+          startIndex: msg.startIndex,
+        };
+        if (msg.reading === "auto") runNovelAuto(opts);
+        else runNovelRealtime(opts);
+      } else {
+        run(msg.mode);
+      }
+    } else if (msg.type === "wt-stop") {
+      window.__wtStop = true;
+      clearInterval(window.__wtNovelPoll);
+      banner("已停止");
+    }
   });
 
   // 默认不自动翻译, 由用户在 popup 触发; 如需自动可取消下一行注释

@@ -43,6 +43,28 @@ async function translateText(payload) {
   return res.json();
 }
 
+async function translateNovelPage(p) {
+  // 翻译并存入服务端会话一页。DOM 文本给 text, 竖排位图给 imageDataUrl。
+  const cfg = await getConfig();
+  await acquire();
+  const form = new FormData();
+  form.append("book", p.book || "untitled");
+  form.append("index", String(p.index || 0));
+  form.append("target_lang", cfg.targetLang);
+  form.append("source_lang", p.sourceLang || "ja");
+  form.append("series", cfg.series || "");
+  form.append("vertical", String(p.vertical !== false));
+  form.append("polish", String(!!p.polish));
+  if (p.text) form.append("text", p.text);
+  if (p.imageDataUrl) {
+    const blob = await (await fetch(p.imageDataUrl)).blob();
+    form.append("image", blob, "page.png");
+  }
+  const res = await fetch(`${cfg.backend}/novel/page`, { method: "POST", body: form });
+  if (!res.ok) throw new Error(`novel ${res.status}`);
+  return res.json();
+}
+
 async function translateImage({ imageUrl, referer }) {
   const cfg = await getConfig();
   await acquire();
@@ -64,6 +86,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: true, data: await translateText(msg.payload) });
       } else if (msg.type === "translateImage") {
         sendResponse({ ok: true, data: await translateImage(msg.payload) });
+      } else if (msg.type === "translateNovelPage") {
+        sendResponse({ ok: true, data: await translateNovelPage(msg.payload) });
       } else {
         sendResponse({ ok: false, error: "unknown message" });
       }

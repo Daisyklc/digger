@@ -31,6 +31,21 @@ _SYSTEM_PROMPT = (
     '[{"id": "...", "text": "译文"}], 不要任何解释或代码块标记。'
 )
 
+# 小说场景: 文学直译, 强调人称/称谓/语气, 为后续润色留出余地
+_NOVEL_SYSTEM_PROMPT = (
+    "你是资深文学译者, 正在翻译小说正文。将给定 JSON 数组中每个 segment 的 text "
+    "翻译为目标语言, 保持数组顺序与 id 一一对应, 不得合并、增删或改变 id。"
+    "忠实保留原意、人物称谓、第一/第二/第三人称与语气, 不要漏译或自行脑补情节。"
+    "只返回 JSON 数组, 形如 [{\"id\": \"...\", \"text\": \"译文\"}], 不要解释或代码块标记。"
+)
+
+# 润色: 不改原意, 只理顺语序、统一文风、去翻译腔 (整段为单位)
+_POLISH_SYSTEM_PROMPT = (
+    "你是资深文学编辑。下面是一段由小说翻译而来的译文。请在完全保留原意、人物称谓与情节的前提下, "
+    "使其更自然流畅、符合目标语言阅读习惯, 消除翻译腔与生硬语序。"
+    "不要增删情节, 不要加入原文没有的信息, 只输出润色后的正文, 不要任何解释。"
+)
+
 
 class TextTranslator:
     def __init__(self) -> None:
@@ -51,16 +66,23 @@ class TextTranslator:
         source_lang: str = "auto",
         series: str | None = None,
         context: list[str] | None = None,
+        style: str = "general",
+        polish: bool = False,
     ) -> tuple[list[TranslatedSegment], int]:
-        """翻译一组文本段, 返回 (结果, 命中缓存数)。"""
+        """翻译一组文本段, 返回 (结果, 命中缓存数)。
+
+        style="novel" 走文学直译; polish=True 额外对每段做二阶段润色。
+        缓存键含 style+polish, 不同风格/润色互不污染。
+        """
         terms = self.glossary.load(series) if series else []
         results: dict[str, TranslatedSegment] = {}
         pending: list[Segment] = []
         cached_hits = 0
+        variant = f"{style}:{'p' if polish else 'np'}"
 
         # 1) 缓存命中
         for seg in segments:
-            key = make_key("text", target_lang, series or "", seg.text)
+            key = make_key("text", target_lang, series or "", variant, seg.text)
             hit = self.cache.get(key)
             if hit:
                 cached_hits += 1
@@ -74,16 +96,24 @@ class TextTranslator:
         for i in range(0, len(pending), MAX_SEGMENTS_PER_BATCH):
             chunk = pending[i : i + MAX_SEGMENTS_PER_BATCH]
             translated = self._translate_chunk(
-                chunk, target_lang, source_lang, terms, context
+                chunk, target_lang, source_lang, terms, context, style, polish
             )
             for seg, tr in zip(chunk, translated):
                 results[seg.id] = tr
                 if tr.error is None:
-                    key = make_key("text", target_lang, series or "", seg.text)
+                    key = make_key("text", target_lang, series or "", variant, seg.text)
                     self.cache.set(key, {"text": tr.text, "used_terms": tr.used_terms})
 
         ordered = [results[s.id] for s in segments]
         return ordered, cached_hits
+
+    def polish_text(self, text: str, target_lang: str) -> str:
+        """对整段译文做通顺润色 (二阶段)。失败则原样返回, 不中断管线。"""
+        if not text.strip() or not settings.polish_enabled:
+            return text
+        user = f"目标语言: {target_lang}\n\n待润色译文:\n{text}"
+        out = self._call_llm(_POLISH_SYSTEM_PROMPT, user, model=settings.polish_model)
+        return out.strip() if out else text
 
     def _translate_chunk(
         self,
@@ -92,6 +122,8 @@ class TextTranslator:
         source_lang: str,
         terms,
         context,
+        style: str = "general",
+        polish: bool = False,
     ) -> list[TranslatedSegment]:
         hint = self.glossary.prompt_hint(terms)
         ctx = "\n".join(context[-3:]) if context else ""
@@ -101,7 +133,8 @@ class TextTranslator:
             "context": ctx,
             "segments": [{"id": s.id, "text": s.text} for s in chunk],
         }
-        sys_prompt = _SYSTEM_PROMPT + (f"\n\n{hint}" if hint else "")
+        base = _NOVEL_SYSTEM_PROMPT if style == "novel" else _SYSTEM_PROMPT
+        sys_prompt = base + (f"\n\n{hint}" if hint else "")
 
         raw = self._call_llm(sys_prompt, json.dumps(user_payload, ensure_ascii=False))
         if raw is None:
@@ -116,6 +149,8 @@ class TextTranslator:
         for s in chunk:
             text = parsed.get(s.id, s.text)
             text, used = self.glossary.enforce(text, terms)
+            if polish and s.id in parsed:
+                text = self.polish_text(text, target_lang)
             out.append(
                 TranslatedSegment(
                     id=s.id,
@@ -126,14 +161,16 @@ class TextTranslator:
             )
         return out
 
-    def _call_llm(self, system: str, user: str, retries: int = 4) -> str | None:
+    def _call_llm(
+        self, system: str, user: str, retries: int = 4, model: str | None = None
+    ) -> str | None:
         """调用 DeepSeek, 指数退避重试。全部失败返回 None。"""
         delay = 4.0
         for attempt in range(retries):
             try:
                 client = self._client()
                 resp = client.chat.completions.create(
-                    model=settings.model,
+                    model=model or settings.model,
                     temperature=0.2,
                     messages=[
                         {"role": "system", "content": system},
