@@ -1,0 +1,40 @@
+/* WebTranslator 浮层样式 */
+
+.wt-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2147483000;
+}
+
+.wt-bubble {
+  position: absolute;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  line-height: 1.1;
+  color: #111;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 6px;
+  padding: 2px;
+  box-sizing: border-box;
+  overflow: hidden;
+  font-family: "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+}
+
+#wt-banner {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483600;
+  display: none;
+  margin-top: 8px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: #d9534f;
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
