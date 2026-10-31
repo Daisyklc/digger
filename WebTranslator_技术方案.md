@@ -120,28 +120,30 @@
 ```
 WebTranslator/
 ├── WebTranslator_技术方案.md         # 本设计文档
-├── requirements-web-translator.txt   # 后端依赖
-├── backend/                          # 翻译后端服务 (Python / FastAPI)
+├── requirements-web-translator.txt   # 依赖
+├── backend/                          # 本地程序: 翻译内核 + 受控浏览器 + API
 │   ├── __init__.py
 │   ├── config.py                     # 配置: Key / 模型 / 语言 / 路径 (环境变量优先)
-│   ├── server.py                     # FastAPI 入口 + 路由
+│   ├── server.py                     # FastAPI 入口 + 路由 + 托管本地 Web UI
+│   ├── browser_controller.py         # 受控浏览器 (Playwright): 开站/截图/翻页/读DOM
+│   ├── live_session.py               # 实时会话: 浏览器↔翻译内核, 手动/自动两模式
 │   ├── schemas.py                    # 请求/响应 Pydantic 模型
-│   ├── text_translator.py            # 文本型: 分段 + 上下文 + 术语 + DeepSeek
+│   ├── text_translator.py            # 文本: 分段 + 上下文 + 术语 + 直译/润色 (DeepSeek)
+│   ├── novel_session.py              # 小说会话: 逐页落盘 / 续传 / 导出
 │   ├── manga_pipeline.py             # 漫画型: OCR → 翻译 → 擦字 → 重排
-│   ├── ocr.py                        # 气泡检测 + 文字识别 (可插拔后端)
+│   ├── ocr.py                        # 气泡/整页识别 (可插拔后端)
 │   ├── typeset.py                    # 擦字(inpaint) + 译文重排渲染
 │   ├── glossary.py                   # 术语库: 抽取 / 存储 / 强制一致
 │   └── cache.py                      # 译文缓存 (本地 KV, 可换 Redis)
-└── extension/                        # 浏览器扩展 (MV3)
-    ├── manifest.json
-    ├── background.js                 # service worker: 请求代理 + 缓存 + 限流
-    ├── content.js                    # 采集 + 回填 + 模式识别
-    ├── overlay.css                   # 浮层 / 漫画图层样式
-    ├── popup.html
-    └── popup.js                      # 设置面板逻辑
+└── webui/                            # 本地 Web UI (仪表盘, 由 server 托管)
+    ├── index.html
+    ├── style.css
+    └── app.js                        # 控制 / 进度 / 对照面板 (只和本地后端通信)
 ```
 
 > 术语库默认落在 `backend` 同级的 `data/glossary/{series}.json`，路径可配置；连载作品以 `series` 作为命名空间，保证跨章一致。
+>
+> 注：原「浏览器扩展」`extension/` 已按 v2 决议**移除**，前端改由 `webui/`（本地仪表盘）+ `browser_controller`（受控浏览器）承担。
 
 ---
 
@@ -383,15 +385,33 @@ manga-ocr>=0.1        # 漫画 OCR (可选, 按 WT_OCR_BACKEND 启用)
 
 ## 10. 典型使用流程
 
-**电子书 / 连载小说**：
-1. 打开阅读页 → 扩展识别为文本型 → 可见段落即时翻译并原位替换。
-2. 滚动时增量翻译后续段；人名等走 `series` 术语库保持一致。
-3. 需要时一键「双语对照 / 还原原文」。
+### 10.1 运行方式（V1，已实现）
 
-**在线漫画**：
-1. 打开漫画页 → 扩展识别为漫画型 → 采集分镜图发后端。
-2. 后端 OCR → 翻译 → 擦字重排 → 返回译图/图层 → 扩展叠加显示。
-3. hover 看原文，一键在原图/译图切换；同话术语一致。
+```bash
+pip install -r requirements-web-translator.txt
+python -m playwright install chromium       # 首次, 下载浏览器内核
+export DEEPSEEK_API_KEY=sk-...               # 公有翻译
+uvicorn backend.server:app --port 8000       # 启动本地程序
+# 浏览器打开 http://localhost:8000 (本地仪表盘)
+```
+
+小说流程（Kindle / 任意小说站）：
+1. 仪表盘点「启动浏览器」→ 弹出真实浏览器窗口，在里面登录目标站、翻到要读的书；
+2. 填书籍 ID / 目标语言 / 方向 / 润色；
+3. **手动模式**：翻一页点「翻译当前页」，右侧对照面板出译文；
+   **自动模式**：点「开始自动翻页」，后台连续截图→翻译→落盘→翻页，进度条实时更新，到书末自停；
+4. 点「导出整本」下载译文（txt / 带页码 / 双语 md），传手机离线看。
+5. 服务器/无显示环境测试可设 `WT_HEADLESS=1` 走无头浏览器。
+
+> 当前 V1 走 **DOM 文本**路径（可选中文本的站点，质量最高）；canvas/DRM 页（如部分 Kindle 日文竖排书）需整页 OCR，为下一里程碑（见 §12.3、§ V-里程碑）。
+
+### 10.2 设想中的沉浸式阅读（后续）
+
+译文已逐页落盘，后续在仪表盘加「阅读器」视图：只看译文、翻页流畅、手机局域网直连。
+
+### 10.3 在线漫画（后续）
+
+受控浏览器截分镜图 → OCR → 翻译 → 擦字重排 → 面板/译图显示；同话术语一致、截图+文本留存。
 
 ---
 

@@ -2,6 +2,7 @@ fastapi>=0.110
 uvicorn>=0.29
 pydantic>=2.6
 python-multipart>=0.0.9
+playwright>=1.44
 requests>=2.31
 openai>=1.30
 pillow>=10.0

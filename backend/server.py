@@ -15,12 +15,17 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+import os
 
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+
+from .browser_controller import controller
 from .config import ENGINE_VERSION, settings
 from .glossary import GlossaryStore
+from .live_session import live
 from .manga_pipeline import MangaPipeline
 from .novel_session import NovelSession
 from .schemas import (
@@ -169,3 +174,80 @@ def novel_session_info(book: str) -> NovelSessionInfo:
 def novel_export(book: str, format: str = "md", layout: str = "translated") -> str:
     """导出整本。format: txt|md; layout: translated|bilingual。"""
     return _novel.export(book, fmt=format, layout=layout)
+
+
+# ---- 受控浏览器 (Playwright) 端点 ------------------------------------------
+
+
+@app.post("/browser/launch")
+async def browser_launch(payload: dict = Body(default={})) -> dict:
+    """启动(或复用)受控浏览器, 可选导航到 url。首次请在打开的窗口里手动登录。"""
+    return await controller.launch(url=payload.get("url"), headless=payload.get("headless"))
+
+
+@app.post("/browser/goto")
+async def browser_goto(payload: dict = Body(...)) -> dict:
+    url = payload.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="缺少 url")
+    return await controller.goto(url)
+
+
+@app.get("/browser/status")
+async def browser_status() -> dict:
+    return await controller.status()
+
+
+@app.post("/browser/next")
+async def browser_next(payload: dict = Body(default={})) -> dict:
+    await controller.next_page(payload.get("direction", "rtl"))
+    return {"ok": True}
+
+
+# ---- 实时会话 (手动 / 自动) 端点 -------------------------------------------
+
+
+@app.post("/session/translate-current")
+async def session_translate_current(cfg: dict = Body(default={})) -> dict:
+    """手动模式: 翻译受控浏览器当前页一次。"""
+    if not settings.llm_ready:
+        raise HTTPException(status_code=503, detail="缺少 DEEPSEEK_API_KEY, 服务未就绪")
+    try:
+        return await live.translate_current(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/session/auto")
+async def session_auto(cfg: dict = Body(default={})) -> dict:
+    """自动模式: 后台连续翻页 + 翻译 + 存盘。"""
+    if not settings.llm_ready:
+        raise HTTPException(status_code=503, detail="缺少 DEEPSEEK_API_KEY, 服务未就绪")
+    try:
+        return await live.start_auto(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/session/stop")
+def session_stop() -> dict:
+    return live.stop()
+
+
+@app.get("/session/progress")
+def session_progress() -> dict:
+    return live.progress()
+
+
+# ---- 本地 Web UI (仪表盘) --------------------------------------------------
+
+_WEBUI_DIR = os.path.join(os.path.dirname(__file__), "..", "webui")
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(os.path.join(_WEBUI_DIR, "index.html"))
+
+
+if os.path.isdir(_WEBUI_DIR):
+    app.mount("/static", StaticFiles(directory=_WEBUI_DIR), name="static")
