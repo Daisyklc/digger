@@ -1,0 +1,25 @@
+services:
+  drama-asr:
+    build:
+      context: ..
+      dockerfile: drama_asr/Dockerfile
+    image: drama-asr:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist downloaded/converted models across restarts.
+      - ./models:/app/models
+      - hf-cache:/models/hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:
