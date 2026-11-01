@@ -1,0 +1,5 @@
+.env
+models/
+out/
+*.srt
+hf-cache/

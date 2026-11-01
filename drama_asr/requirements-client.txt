@@ -1,0 +1,2 @@
+# Local client dependencies (no GPU, no models).
+requests>=2.31
