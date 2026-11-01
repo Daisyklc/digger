@@ -1,0 +1,18 @@
+# 复制本文件为 config.local.yaml 后填写真实值。
+# config.local.yaml 已被 .gitignore, 不会提交到仓库。
+#
+# Windows:
+#   copy config.local.example.yaml config.local.yaml
+# macOS / Linux:
+#   cp config.local.example.yaml config.local.yaml
+
+deepseek_api_key: "sk-请替换为你的DeepSeek密钥"
+# model: deepseek-chat
+# target_lang: zh-CN
+# polish: true
+# polish_model: deepseek-chat
+# novel_dir: ./data/novel
+# cache_dir: ./data/cache
+# glossary_dir: ./data/glossary
+# browser_profile: ./data/browser
+# ocr_backend: manga-ocr

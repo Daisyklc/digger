@@ -5,6 +5,7 @@ data/
 .venv/
 venv/
 .env
+config.local.yaml
 .DS_Store
 .pytest_cache/
 .coverage

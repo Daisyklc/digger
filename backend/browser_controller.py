@@ -30,7 +30,11 @@ class BrowserController:
         self._ctx = None
         self._page = None
         self._lock = asyncio.Lock()
-        self.user_data_dir = os.environ.get("WT_BROWSER_PROFILE", "./data/browser")
+        from .config import settings
+
+        self.user_data_dir = os.environ.get(
+            "WT_BROWSER_PROFILE", settings.browser_profile
+        )
 
     @property
     def running(self) -> bool:
