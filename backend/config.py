@@ -81,8 +81,8 @@ class Settings:
         or DEFAULT_TARGET_LANG
     )
     ocr_backend: str = field(
-        default_factory=lambda: _cfg("WT_OCR_BACKEND", "ocr_backend", "manga-ocr")
-        or "manga-ocr"
+        default_factory=lambda: _cfg("WT_OCR_BACKEND", "ocr_backend", "paddle")
+        or "paddle"
     )
     glossary_dir: str = field(
         default_factory=lambda: _cfg("WT_GLOSSARY_DIR", "glossary_dir", "./data/glossary")
@@ -99,6 +99,11 @@ class Settings:
     browser_profile: str = field(
         default_factory=lambda: _cfg("WT_BROWSER_PROFILE", "browser_profile", "./data/browser")
         or "./data/browser"
+    )
+    # 截图队列目录 (采集与 OCR/翻译解耦)
+    capture_dir: str = field(
+        default_factory=lambda: _cfg("WT_CAPTURE_DIR", "capture_dir", "./data/captures")
+        or "./data/captures"
     )
     # 润色: 小说场景默认开启; 可指向更强模型 / 外部 API
     polish_enabled: bool = field(

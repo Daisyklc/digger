@@ -55,12 +55,14 @@
       </section>
 
       <section class="card">
-        <h2>3 · 翻译</h2>
+        <h2>3 · 采集 / 翻译 (已分离)</h2>
+        <p class="hint">采集只追加不覆盖。若该书已有截图, 续采前请先在受控浏览器里手动翻到衔接页, 再点「开始采集」。</p>
         <div class="row">
           <button id="translateOne">翻译当前页</button>
-          <button id="startAuto" class="primary">开始自动翻页</button>
+          <button id="startCapture" class="primary">开始采集</button>
+          <button id="startProcess">处理队列</button>
           <button id="stop" class="danger" disabled>停止</button>
-          <button id="export" class="ghost">导出整本(md)</button>
+          <button id="export" class="ghost">导出整本(txt 原文+译文)</button>
         </div>
         <div class="progress">
           <div id="progressMsg">就绪</div>

@@ -15,4 +15,9 @@ deepseek_api_key: "sk-请替换为你的DeepSeek密钥"
 # cache_dir: ./data/cache
 # glossary_dir: ./data/glossary
 # browser_profile: ./data/browser
-# ocr_backend: manga-ocr
+# ocr_backend: paddle          # paddle | manga-ocr | vision-llm
+# 截图队列 (采集与 OCR/翻译分离)
+# capture_dir: ./data/captures
+# capture_max_pending: 800     # 未处理截图上限, 满则采集等待
+# capture_max_mb: 5120         # 截图目录总大小上限 (MB), 超限定量丢弃
+# capture_keep_done: 0         # 译完后保留几张已完成截图, 0=立即删除

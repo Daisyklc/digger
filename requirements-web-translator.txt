@@ -9,3 +9,5 @@ pillow>=10.0
 opencv-python>=4.9
 numpy>=1.26
 manga-ocr>=0.1
+paddlepaddle>=3.0
+paddleocr>=3.0

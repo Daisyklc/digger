@@ -67,18 +67,30 @@ class NovelSession:
         key = str(index)
 
         # 幂等: 已翻过直接返回 (断点续传)
+        # 但若旧结果是 OCR 胡话/过短, 允许用新结果覆盖
         if key in data["pages"]:
             p = data["pages"][key]
-            return NovelPageResponse(
-                book=book, index=index, orig=p["orig"],
-                translated=p["translated"], polished=p.get("polished"), cached=True,
-            )
+            old_orig = (p.get("orig") or "").strip()
+            if ocr.ocr_quality_ok(old_orig) or not (text or image_bytes):
+                return NovelPageResponse(
+                    book=book, index=index, orig=p["orig"],
+                    translated=p["translated"], polished=p.get("polished"), cached=True,
+                )
+            logger.info("第 %d 页旧 OCR 质量差, 重新识别/翻译", index)
 
         # 取原文: DOM 文本直接用; 否则整页竖排 OCR
         orig = text if text is not None else ""
+        from_ocr = False
         if not orig and image_bytes is not None:
             orig = ocr.read_page(image_bytes, source_lang=source_lang, vertical=vertical)
-        if not orig.strip():
+            from_ocr = True
+        # OCR 胡话/过短不落盘, 避免导出刷屏「即便如此，」
+        if from_ocr and not ocr.ocr_quality_ok(orig):
+            logger.warning("第 %d 页 OCR 质量不足, 跳过落盘: %r", index, (orig or "")[:40])
+            return NovelPageResponse(
+                book=book, index=index, orig="", translated="", polished=None
+            )
+        if not (orig or "").strip():
             return NovelPageResponse(
                 book=book, index=index, orig="", translated="", polished=None
             )
@@ -132,17 +144,38 @@ class NovelSession:
 
     # ---- 导出 --------------------------------------------------------------
     def export(self, book: str, fmt: str = "md", layout: str = "translated") -> str:
+        """整本导出。
+
+        layout:
+            translated — 只译文 (润色优先)
+            orig       — 只原文
+            bilingual  — 原文+译文对照
+        fmt: md | txt
+        """
         data = self._load(book)
         pages = sorted(data["pages"].values(), key=lambda p: p["index"])
         parts: list[str] = []
         for p in pages:
-            body = p.get("polished") or p.get("translated") or ""
-            if layout == "bilingual":
+            orig = (p.get("orig") or "").strip()
+            body = (p.get("polished") or p.get("translated") or "").strip()
+            if not orig and not body:
+                continue
+            if layout == "orig":
+                if orig:
+                    parts.append(orig)
+            elif layout == "bilingual":
                 if fmt == "md":
-                    parts.append(f"> {p['orig']}\n\n{body}")
+                    parts.append(f"> {orig}\n\n{body}")
                 else:
-                    parts.append(f"【原文】{p['orig']}\n【译文】{body}")
+                    parts.append(f"【原文】\n{orig}\n\n【译文】\n{body}")
             else:
-                parts.append(body)
-        sep = "\n\n---\n\n" if fmt == "md" else "\n\n"
+                if body:
+                    parts.append(body)
+        if fmt == "md":
+            sep = "\n\n---\n\n"
+        elif layout == "bilingual":
+            sep = "\n\n==========\n\n"
+        else:
+            # 纯原文/纯译文: 页与页空一行拼接, 读起来像连续正文
+            sep = "\n\n"
         return sep.join(parts)

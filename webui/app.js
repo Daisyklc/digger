@@ -51,14 +51,21 @@ async function refreshBrowser() {
 
 function paintProgress(p) {
   $("progressMsg").textContent = p.message || "";
-  $("progressNum").textContent = `已翻 ${p.pages_done || 0} 页`;
+  const captured = p.pages_captured != null ? p.pages_captured : p.index || 0;
+  const done = p.pages_done || 0;
+  const pending = p.queue_pending || 0;
+  const mb = p.queue_mb != null ? p.queue_mb : 0;
+  const nextIdx = p.next_append_index != null ? p.next_append_index : p.index;
+  $("progressNum").textContent =
+    `截图 ${captured} · 下一index ${nextIdx} · 已译 ${done} · 队列 ${pending} · 占用 ${mb}MB`;
   if (p.last_orig != null) $("orig").textContent = p.last_orig;
   if (p.last_translated != null) $("trans").textContent = p.last_translated;
   const running = !!p.running;
   $("stop").disabled = !running;
-  $("startAuto").disabled = running;
+  if ($("startCapture")) $("startCapture").disabled = !!p.capturing;
+  if ($("startProcess")) $("startProcess").disabled = !!p.working;
   // 无总页数, 用"动态条"表示运行中
-  $("progressFill").style.width = running ? "100%" : (p.pages_done ? "100%" : "0");
+  $("progressFill").style.width = running ? "100%" : (done ? "100%" : "0");
   $("progressFill").style.background = running ? "#2d7ff9" : "#2faa5b";
 }
 
@@ -92,12 +99,34 @@ $("translateOne").addEventListener("click", async () => {
   pollProgress();
 });
 
-$("startAuto").addEventListener("click", async () => {
+$("startCapture").addEventListener("click", async () => {
   try {
-    await api("/session/auto", "POST", cfg());
+    // 续采前提示: 只追加, 电子书位置靠人工
+    const preview = await api(`/session/progress`);
+    // progress 绑定的是上次 book; 先用当前表单 book 打一次 capture 前确认
+    const book = cfg().book;
+    const info = await api(`/session/capture-info?book=${encodeURIComponent(book)}`);
+    if (info.existing_count > 0) {
+      const ok = confirm(
+        `「${book}」已有 ${info.existing_count} 页截图。\n` +
+          `将从 index=${info.next_append_index} 追加写入 (不覆盖旧文件)。\n\n` +
+          `请确认受控浏览器里电子书已手动翻到衔接页。\n继续？`
+      );
+      if (!ok) return;
+    }
+    await api("/session/capture", "POST", cfg());
     startPolling();
   } catch (e) {
-    alert("启动失败: " + e.message);
+    alert("采集启动失败: " + e.message);
+  }
+});
+
+$("startProcess").addEventListener("click", async () => {
+  try {
+    await api("/session/process", "POST", cfg());
+    startPolling();
+  } catch (e) {
+    alert("处理启动失败: " + e.message);
   }
 });
 
@@ -105,16 +134,28 @@ $("stop").addEventListener("click", async () => {
   try { paintProgress(await api("/session/stop", "POST", {})); } catch (e) { alert(e.message); }
 });
 
-$("export").addEventListener("click", async () => {
-  const book = $("book").value.trim() || "untitled";
-  const url = `/novel/export?book=${encodeURIComponent(book)}&format=md&layout=bilingual`;
+async function downloadTxt(book, layout, filename) {
+  const url = `/novel/export?book=${encodeURIComponent(book)}&format=txt&layout=${layout}`;
   const res = await fetch(url);
+  if (!res.ok) throw new Error(`导出失败 (${res.status})`);
   const text = await res.text();
-  const blob = new Blob([text], { type: "text/markdown" });
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `${book}.md`;
+  a.download = filename;
   a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$("export").addEventListener("click", async () => {
+  const book = $("book").value.trim() || "untitled";
+  try {
+    // 原文 / 译文分成两个 txt, 便于分别阅读或后处理
+    await downloadTxt(book, "orig", `${book}.原文.txt`);
+    await downloadTxt(book, "translated", `${book}.译文.txt`);
+  } catch (e) {
+    alert(e.message || String(e));
+  }
 });
 
 // --- 轮询 ---

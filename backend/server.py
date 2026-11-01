@@ -12,10 +12,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-
 import os
+
+# 须在 import paddle 相关模块前设置, 避免 Windows oneDNN 异常
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +26,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from .browser_controller import controller
+from .capture_queue import capture_queue
 from .config import ENGINE_VERSION, settings
 from .glossary import GlossaryStore
 from .live_session import live
@@ -60,6 +64,21 @@ _text_translator = TextTranslator()
 _glossary = GlossaryStore(settings.glossary_dir)
 _novel = NovelSession()
 _manga: MangaPipeline | None = None  # 惰性初始化, 避免无漫画需求时加载 OCR 重依赖
+
+
+@app.on_event("startup")
+async def _preload_ocr() -> None:
+    """后台预加载 manga-ocr, 避免点「自动翻页」后卡在首次模型下载。"""
+
+    def _load() -> None:
+        try:
+            from . import ocr as ocr_mod
+
+            ocr_mod._get_manga_ocr()
+        except Exception:  # noqa: BLE001
+            logger.exception("预加载 OCR 失败 (可稍后在首次识别时重试)")
+
+    asyncio.get_running_loop().run_in_executor(None, _load)
 
 
 def _get_manga() -> MangaPipeline:
@@ -182,7 +201,13 @@ def novel_export(book: str, format: str = "md", layout: str = "translated") -> s
 @app.post("/browser/launch")
 async def browser_launch(payload: dict = Body(default={})) -> dict:
     """启动(或复用)受控浏览器, 可选导航到 url。首次请在打开的窗口里手动登录。"""
-    return await controller.launch(url=payload.get("url"), headless=payload.get("headless"))
+    try:
+        return await controller.launch(
+            url=payload.get("url"), headless=payload.get("headless")
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("启动受控浏览器失败")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/browser/goto")
@@ -218,9 +243,43 @@ async def session_translate_current(cfg: dict = Body(default={})) -> dict:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@app.get("/session/capture-info")
+def session_capture_info(book: str = "untitled") -> dict:
+    """续采预览: 已有页数与下一追加 index (不启动采集)。"""
+    return {
+        "book": book,
+        "existing_count": capture_queue.existing_count(book),
+        "next_append_index": capture_queue.next_append_index(book),
+        "max_index": capture_queue.max_index(book),
+    }
+
+
+@app.post("/session/capture")
+async def session_capture(cfg: dict = Body(default={})) -> dict:
+    """只采集: 截图落盘 + 翻页, 不跑 OCR/翻译 (可不依赖 API Key)。
+
+    只追加不覆盖; 电子书翻页位置由人工保证。
+    """
+    try:
+        return await live.start_capture(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/session/process")
+async def session_process(cfg: dict = Body(default={})) -> dict:
+    """只处理: 消费本地截图队列, OCR + 翻译。"""
+    if not settings.llm_ready:
+        raise HTTPException(status_code=503, detail="缺少 DEEPSEEK_API_KEY, 服务未就绪")
+    try:
+        return await live.start_process(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @app.post("/session/auto")
 async def session_auto(cfg: dict = Body(default={})) -> dict:
-    """自动模式: 后台连续翻页 + 翻译 + 存盘。"""
+    """采集 + 处理并行 (截图不阻塞在 OCR 上)。"""
     if not settings.llm_ready:
         raise HTTPException(status_code=503, detail="缺少 DEEPSEEK_API_KEY, 服务未就绪")
     try:
