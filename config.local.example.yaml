@@ -1,0 +1,23 @@
+# 复制本文件为 config.local.yaml 后填写真实值。
+# config.local.yaml 已被 .gitignore, 不会提交到仓库。
+#
+# Windows:
+#   copy config.local.example.yaml config.local.yaml
+# macOS / Linux:
+#   cp config.local.example.yaml config.local.yaml
+
+deepseek_api_key: "sk-请替换为你的DeepSeek密钥"
+# model: deepseek-chat
+# target_lang: zh-CN
+# polish: true
+# polish_model: deepseek-chat
+# novel_dir: ./data/novel
+# cache_dir: ./data/cache
+# glossary_dir: ./data/glossary
+# browser_profile: ./data/browser
+# ocr_backend: paddle          # paddle | manga-ocr | vision-llm
+# 截图队列 (采集与 OCR/翻译分离)
+# capture_dir: ./data/captures
+# capture_max_pending: 800     # 未处理截图上限, 满则采集等待
+# capture_max_mb: 5120         # 截图目录总大小上限 (MB), 超限定量丢弃
+# capture_keep_done: 0         # 译完后保留几张已完成截图, 0=立即删除
