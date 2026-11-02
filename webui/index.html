@@ -28,7 +28,17 @@
       <section class="card">
         <h2>2 · 配置</h2>
         <div class="grid">
-          <label>书籍 ID<input id="book" type="text" value="book-001" /></label>
+          <label>采集文件夹
+            <div class="row tight">
+              <select id="bookSelect">
+                <option value="">加载中…</option>
+              </select>
+              <button id="refreshBooks" class="ghost" type="button" title="刷新子目录">刷新</button>
+            </div>
+          </label>
+          <label>新书名 (采集时写入)
+            <input id="book" type="text" value="book-001" placeholder="选已有文件夹或输入新书名" />
+          </label>
           <label>目标语言
             <select id="targetLang">
               <option value="zh-CN">简体中文</option>
@@ -50,17 +60,23 @@
             </select>
           </label>
           <label>自动翻页间隔(秒)<input id="interval" type="number" value="1.5" step="0.5" min="0.5" /></label>
+          <label>OCR/翻译并行数
+            <input id="concurrency" type="number" value="2" min="1" max="4" step="1" title="Windows 内存不大时建议 1–2" />
+          </label>
           <label class="check"><input id="polish" type="checkbox" checked /> 通顺润色(二阶段)</label>
         </div>
+        <div id="bookStats" class="status-line">选择或输入书籍文件夹</div>
       </section>
 
       <section class="card">
-        <h2>3 · 采集 / 翻译 (已分离)</h2>
-        <p class="hint">采集只追加不覆盖。若该书已有截图, 续采前请先在受控浏览器里手动翻到衔接页, 再点「开始采集」。</p>
+        <h2>3 · 三阶段 (可独立运行)</h2>
+        <p class="hint">采集 / OCR / 翻译各自选上方文件夹异步执行。「全自动运行」在同一本书上同时启动三阶段。</p>
         <div class="row">
           <button id="translateOne">翻译当前页</button>
           <button id="startCapture" class="primary">开始采集</button>
-          <button id="startProcess">处理队列</button>
+          <button id="startOcr">OCR</button>
+          <button id="startTranslate">翻译</button>
+          <button id="startAuto" class="primary">全自动运行</button>
           <button id="stop" class="danger" disabled>停止</button>
           <button id="export" class="ghost">导出整本(txt 原文+译文)</button>
         </div>

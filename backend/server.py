@@ -41,6 +41,7 @@ from .schemas import (
     TextTranslateRequest,
     TextTranslateResponse,
 )
+from .stages import stages
 from .text_translator import TextTranslator
 
 logging.basicConfig(
@@ -229,7 +230,7 @@ async def browser_next(payload: dict = Body(default={})) -> dict:
     return {"ok": True}
 
 
-# ---- 实时会话 (手动 / 自动) 端点 -------------------------------------------
+# ---- 实时会话 / 三阶段解耦 端点 -------------------------------------------
 
 
 @app.post("/session/translate-current")
@@ -243,59 +244,91 @@ async def session_translate_current(cfg: dict = Body(default={})) -> dict:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@app.get("/session/books")
+def session_books() -> dict:
+    """采集子目录列表, 供 UI 下拉框选择。"""
+    return {"books": capture_queue.list_books(), "root": str(capture_queue.root)}
+
+
 @app.get("/session/capture-info")
 def session_capture_info(book: str = "untitled") -> dict:
     """续采预览: 已有页数与下一追加 index (不启动采集)。"""
+    st = capture_queue.stats(book)
     return {
         "book": book,
-        "existing_count": capture_queue.existing_count(book),
-        "next_append_index": capture_queue.next_append_index(book),
+        "existing_count": st.get("existing_count", 0),
+        "next_append_index": st.get("next_append_index", 0),
         "max_index": capture_queue.max_index(book),
+        "ocr_pending": st.get("ocr_pending", 0),
+        "ocr_done": st.get("ocr_done", 0),
+        "tr_pending": st.get("tr_pending", 0),
+        "tr_done": st.get("tr_done", 0),
     }
 
 
 @app.post("/session/capture")
 async def session_capture(cfg: dict = Body(default={})) -> dict:
-    """只采集: 截图落盘 + 翻页, 不跑 OCR/翻译 (可不依赖 API Key)。
-
-    只追加不覆盖; 电子书翻页位置由人工保证。
-    """
+    """只采集: 截图落盘 + 翻页, 不跑 OCR/翻译 (可不依赖 API Key)。"""
     try:
-        return await live.start_capture(cfg)
+        return await stages.start_capture(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/session/ocr")
+async def session_ocr(cfg: dict = Body(default={})) -> dict:
+    """只 OCR: 对选定采集文件夹做有界并行识别。"""
+    try:
+        return await stages.start_ocr(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/session/translate")
+async def session_translate(cfg: dict = Body(default={})) -> dict:
+    """只翻译: 对选定文件夹中已 OCR 页做有界并行翻译。"""
+    if not settings.llm_ready:
+        raise HTTPException(status_code=503, detail="缺少 DEEPSEEK_API_KEY, 服务未就绪")
+    try:
+        return await stages.start_translate(cfg)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/session/process")
 async def session_process(cfg: dict = Body(default={})) -> dict:
-    """只处理: 消费本地截图队列, OCR + 翻译。"""
+    """兼容旧接口: OCR + 翻译。"""
     if not settings.llm_ready:
         raise HTTPException(status_code=503, detail="缺少 DEEPSEEK_API_KEY, 服务未就绪")
     try:
-        return await live.start_process(cfg)
+        return await stages.start_process(cfg)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/session/auto")
 async def session_auto(cfg: dict = Body(default={})) -> dict:
-    """采集 + 处理并行 (截图不阻塞在 OCR 上)。"""
+    """全自动运行: 同一本书上采集 + OCR + 翻译并行。"""
     if not settings.llm_ready:
         raise HTTPException(status_code=503, detail="缺少 DEEPSEEK_API_KEY, 服务未就绪")
     try:
-        return await live.start_auto(cfg)
+        return await stages.start_auto(cfg)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/session/stop")
-def session_stop() -> dict:
-    return live.stop()
+def session_stop(payload: dict = Body(default={})) -> dict:
+    """停止。可选 stage=capture|ocr|translate, book=..."""
+    return stages.stop(
+        stage=payload.get("stage"),
+        book=payload.get("book"),
+    )
 
 
 @app.get("/session/progress")
-def session_progress() -> dict:
-    return live.progress()
+def session_progress(book: str | None = None) -> dict:
+    return stages.progress(book)
 
 
 # ---- 本地 Web UI (仪表盘) --------------------------------------------------

@@ -1,11 +1,10 @@
-"""实时会话: 采集 / OCR / 翻译 三阶段解耦。
+"""实时会话: 采集循环 + 手动翻页翻译。
 
-- translate_current(): 手动模式——采集当前页 → 立即翻译 → 存盘。
-- start_auto(): 自动模式双协程
-    * 采集循环 (快): 截图落盘 → 翻页
-    * 消费循环 (慢): 读本地队列 → OCR → 翻译落盘 → 按配额删图
-
-进度优先: UI 通过 progress() 轮询采集进度、队列积压、翻译进度。
+OCR / 翻译 / 全自动 编排见 stages.StageManager。
+本模块保留:
+    - translate_current(): 手动模式——采集当前页 → 立即翻译 → 存盘
+    - start_capture() / _capture_loop(): 只截图落盘 + 翻页
+    - progress()/stop(): 兼容旧 UI, 转发到 stages
 """
 
 from __future__ import annotations
@@ -22,34 +21,16 @@ from .novel_session import NovelSession
 logger = logging.getLogger("WebTranslator.live")
 
 
-def _write_ocr_sidecar(book: str, index: int, text: str) -> None:
-    """把每页 OCR 日文落到 captures/{book}/{index}.ocr.txt, 便于抽查。"""
-    from pathlib import Path
-
-    from .capture_queue import capture_queue
-
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in book)
-    path = Path(capture_queue.root) / safe / f"{index:06d}.ocr.txt"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text or "", encoding="utf-8")
-    except OSError as exc:
-        logger.warning("写 OCR sidecar 失败: %s", exc)
-
-
 class LiveSession:
     def __init__(self) -> None:
         self.novel = NovelSession()
         self._capture_task: asyncio.Task | None = None
-        self._worker_task: asyncio.Task | None = None
-        self._worker_stop = False
         self.reset_state()
 
     def reset_state(self) -> None:
         self.running = False
         self.capturing = False
-        self.working = False
-        self._worker_stop = False
+        self.working = False  # 兼容旧字段; 真实 OCR/翻译状态在 stages
         self.book = "untitled"
         self.target_lang = "zh-CN"
         self.source_lang = "ja"
@@ -57,7 +38,7 @@ class LiveSession:
         self.direction = "rtl"
         self.interval = 1.5
         self.polish = True
-        self.index = 0  # 下一张待采集页号
+        self.index = 0
         self.pages_captured = 0
         self.pages_done = 0
         self.message = "就绪"
@@ -127,7 +108,6 @@ class LiveSession:
         self._ensure_book_cfg(cfg)
         max_pages = int(cfg.get("max_pages") or 2000)
 
-        # 磁盘断点优先于内存; start_index 仅在目录为空时生效
         existing = await run_in_threadpool(capture_queue.existing_count, self.book)
         append_at = await run_in_threadpool(capture_queue.next_append_index, self.book)
         if existing == 0 and cfg.get("start_index") is not None:
@@ -150,41 +130,30 @@ class LiveSession:
         return self.progress()
 
     async def start_process(self, cfg: dict) -> dict:
-        """只启动后台处理: 消费本地截图队列做 OCR + 翻译。"""
-        if self.working:
-            return self.progress()
-        self._ensure_book_cfg(cfg)
-        # 允许对上次 OCR 失败但仍有截图的任务重试
-        revived = await run_in_threadpool(capture_queue.requeue_failed, self.book)
-        self.running = True
-        self.working = True
-        pending = capture_queue.pending_count(self.book)
-        self.message = (
-            f"处理队列中… (待处理 {pending}"
-            + (f", 重试失败 {revived}" if revived else "")
-            + ")"
-        )
-        self._worker_task = asyncio.create_task(self._worker_loop())
-        return self.progress()
+        """兼容: 转发到 stages (OCR + 翻译)。"""
+        from .stages import stages
+
+        return await stages.start_process(cfg)
 
     async def start_auto(self, cfg: dict) -> dict:
-        """采集 + 处理一起开 (采集仍不阻塞在 OCR 上)。"""
-        await self.start_capture(cfg)
-        await self.start_process(cfg)
-        self.message = "采集+处理并行中 (截图先行, 翻译随后)…"
-        return self.progress()
+        """兼容: 全自动运行。"""
+        from .stages import stages
+
+        return await stages.start_auto(cfg)
 
     async def _capture_loop(self, max_pages: int) -> None:
         """快路径: 只负责截图落盘 + 翻页, 绝不调用 OCR/翻译。"""
+        from .stages import stages
+
         prev_fp = None
         dup_streak = 0
         try:
             while self.running and self.capturing and self.pages_captured < max_pages:
                 pending = capture_queue.pending_count(self.book)
+                ocr_busy = stages.is_running("ocr", self.book)
                 self.message = f"采集第 {self.index} 页… (队列待处理 {pending})"
-                # 队列满: 若后台在处理则反压等待; 否则停采集让用户先处理
                 if pending >= capture_queue.max_pending:
-                    if self.working:
+                    if ocr_busy or stages.is_running("translate", self.book):
                         ok = await run_in_threadpool(
                             capture_queue.wait_for_slot, self.book, 180.0
                         )
@@ -193,7 +162,7 @@ class LiveSession:
                         continue
                     self.message = (
                         f"队列已满 ({pending}), 采集暂停。"
-                        "请点「处理队列」消化后再继续采集。"
+                        "请点「OCR」消化后再继续采集。"
                     )
                     break
 
@@ -203,14 +172,13 @@ class LiveSession:
                     if dup_streak >= 2:
                         self.message = (
                             f"采集结束(疑似书末), 已截 {self.pages_captured} 页。"
-                            "可点「处理队列」开始 OCR/翻译。"
+                            "可点「OCR」开始识别。"
                         )
                         break
                 else:
                     dup_streak = 0
                 prev_fp = cap["fingerprint"]
 
-                # 防御并发/重启导致 index 撞车: 入队前再对齐一次追加点
                 want = capture_queue.next_append_index(self.book)
                 if want > self.index:
                     logger.warning(
@@ -222,7 +190,6 @@ class LiveSession:
                         capture_queue.enqueue, self.book, self.index, cap
                     )
                 except FileExistsError:
-                    # 极端竞态: 跳到下一个空位再写一次
                     self.index = capture_queue.next_append_index(self.book)
                     await run_in_threadpool(
                         capture_queue.enqueue, self.book, self.index, cap
@@ -236,7 +203,6 @@ class LiveSession:
                     f"(队列 {capture_queue.pending_count(self.book)})"
                 )
 
-                # 每次只翻一屏; 翻完等进度稳定再采下一张
                 prev_prog = await controller.next_page(self.direction)
                 await controller.wait_content_ready(
                     timeout=max(2.5, self.interval + 1.0),
@@ -248,161 +214,27 @@ class LiveSession:
             self.message = f"采集异常停止: {exc}"
         finally:
             self.capturing = False
-            if not self.working:
+            busy = stages.is_running("ocr", self.book) or stages.is_running(
+                "translate", self.book
+            )
+            if not busy:
                 self.running = False
             if "异常" not in self.message and "队列已满" not in self.message:
                 self.message = (
                     f"采集完成 {self.pages_captured} 页 "
-                    f"(待处理 {capture_queue.pending_count(self.book)})。"
-                    "可点「处理队列」开始 OCR/翻译。"
-                )
-
-    async def _worker_loop(self) -> None:
-        """慢路径: 消费本地队列, OCR + 翻译。与采集完全独立。"""
-        empty_idle = 0
-        self._worker_stop = False
-        try:
-            while True:
-                if getattr(self, "_worker_stop", False):
-                    break
-                job = await run_in_threadpool(capture_queue.next_pending, self.book)
-                if job is None:
-                    empty_idle += 1
-                    # 采集仍在进行: 继续等新截图; 否则空转几次后结束
-                    if self.capturing:
-                        empty_idle = 0
-                        await asyncio.sleep(0.4)
-                        continue
-                    if empty_idle >= 5:
-                        break
-                    await asyncio.sleep(0.4)
-                    continue
-                empty_idle = 0
-                self.message = (
-                    f"处理第 {job.index} 页 "
-                    f"(待处理 {capture_queue.pending_count(self.book)})…"
-                )
-                try:
-                    img = await run_in_threadpool(capture_queue.load_image_bytes, job)
-                    if job.kind == "text" and (job.text or "").strip():
-                        use_cap = {
-                            "kind": "text",
-                            "text": job.text,
-                            "url": job.url,
-                            "screenshot_bytes": None,
-                        }
-                    else:
-                        use_cap = {
-                            "kind": "image",
-                            "text": "",
-                            "url": job.url,
-                            "screenshot_bytes": img,
-                        }
-                    from . import ocr as ocr_mod
-
-                    # 图片页: 先 OCR → sidecar → 质量门槛 → 再翻译
-                    if use_cap["kind"] == "image":
-                        if not img:
-                            await run_in_threadpool(
-                                capture_queue.mark_done, job, "missing_image"
-                            )
-                            continue
-                        ocr_text = await run_in_threadpool(
-                            ocr_mod.read_page,
-                            img,
-                            self.source_lang,
-                            self.direction == "rtl",
-                        )
-                        await run_in_threadpool(
-                            _write_ocr_sidecar, self.book, job.index, ocr_text
-                        )
-                        if not ocr_mod.ocr_quality_ok(ocr_text or ""):
-                            await run_in_threadpool(
-                                capture_queue.mark_done, job, "ocr_quality"
-                            )
-                            logger.warning(
-                                "第 %d 页 OCR 质量不足, 保留截图: %r",
-                                job.index,
-                                (ocr_text or "")[:40],
-                            )
-                            self.message = (
-                                f"第 {job.index} 页 OCR 失败已跳过 "
-                                f"(待处理 {capture_queue.pending_count(self.book)})"
-                            )
-                            continue
-                        use_cap = {
-                            "kind": "text",
-                            "text": ocr_text,
-                            "url": job.url,
-                            "screenshot_bytes": None,
-                        }
-
-                    out = await self._translate_capture(use_cap, job.index)
-                    orig = (out.get("orig") or "").strip()
-                    if not orig:
-                        await run_in_threadpool(
-                            capture_queue.mark_done, job, "empty_ocr"
-                        )
-                        logger.warning("第 %d 页文本为空", job.index)
-                    else:
-                        await run_in_threadpool(capture_queue.mark_done, job, None)
-                        self.message = (
-                            f"已翻译第 {out['index']} 页 "
-                            f"(待处理 {capture_queue.pending_count(self.book)})"
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("处理队列任务失败 index=%s", job.index)
-                    await run_in_threadpool(capture_queue.mark_done, job, str(exc))
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("消费循环异常")
-            self.message = f"翻译异常停止: {exc}"
-        finally:
-            self.working = False
-            if not self.capturing:
-                self.running = False
-            if "异常" not in self.message:
-                self.message = (
-                    f"处理结束: 截图 {self.pages_captured} 页, "
-                    f"已译 {self.pages_done} 页, "
-                    f"队列剩余 {capture_queue.pending_count(self.book)}"
+                    f"(待 OCR {capture_queue.stage_stats(self.book).get('ocr_pending', 0)})。"
+                    "可点「OCR」开始识别。"
                 )
 
     def stop(self) -> dict:
-        """停采集 / 停处理。有采集先停采集; 再点停处理。"""
-        if self.capturing:
-            self.capturing = False
-            self.message = (
-                "已停止采集。"
-                + (" 处理队列仍在运行…" if self.working else " 可点「处理队列」翻译已截图。")
-            )
-            return self.progress()
-        if self.working:
-            self._worker_stop = True
-            self.message = "正在停止处理…"
-            return self.progress()
-        self.running = False
-        return self.progress()
+        from .stages import stages
+
+        return stages.stop()
 
     def progress(self) -> dict:
-        st = capture_queue.stats(self.book)
-        return {
-            "running": self.running or self.capturing or self.working,
-            "capturing": self.capturing,
-            "working": self.working,
-            "book": self.book,
-            "index": self.index,
-            "pages_captured": self.pages_captured,
-            "pages_done": self.pages_done,
-            "queue_pending": st["pending"],
-            "queue_mb": st["mb"],
-            "queue_max_pending": st["max_pending"],
-            "queue_max_mb": st["max_mb"],
-            "existing_count": st.get("existing_count", 0),
-            "next_append_index": st.get("next_append_index", self.index),
-            "message": self.message,
-            "last_orig": self.last_orig,
-            "last_translated": self.last_translated,
-        }
+        from .stages import stages
+
+        return stages.progress(self.book if self.book else stages.focus_book)
 
 
 live = LiveSession()
