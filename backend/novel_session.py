@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import threading
 
 from . import ocr
 from .config import NOVEL_CONTEXT_CHARS, settings
@@ -29,6 +30,17 @@ class NovelSession:
         self.root = settings.novel_dir
         os.makedirs(self.root, exist_ok=True)
         self.translator = TextTranslator()
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _book_lock(self, book: str) -> threading.Lock:
+        """并行翻译时按书加锁, 避免 JSON 读写互相覆盖。"""
+        with self._locks_guard:
+            lock = self._locks.get(book)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[book] = lock
+            return lock
 
     # ---- 持久化 ------------------------------------------------------------
     def _path(self, book: str) -> str:
@@ -62,31 +74,46 @@ class NovelSession:
         vertical: bool = True,
         polish: bool = True,
     ) -> NovelPageResponse:
-        data = self._load(book)
-        data["target_lang"] = target_lang
         key = str(index)
+        lock = self._book_lock(book)
 
-        # 幂等: 已翻过直接返回 (断点续传)
-        # 但若旧结果是 OCR 胡话/过短, 允许用新结果覆盖
-        if key in data["pages"]:
-            p = data["pages"][key]
-            old_orig = (p.get("orig") or "").strip()
-            if ocr.ocr_quality_ok(old_orig) or not (text or image_bytes):
-                return NovelPageResponse(
-                    book=book, index=index, orig=p["orig"],
-                    translated=p["translated"], polished=p.get("polished"), cached=True,
-                )
-            logger.info("第 %d 页旧 OCR 质量差, 重新识别/翻译", index)
+        # 短锁: 读盘 + 幂等检查 + 取跨页上下文
+        with lock:
+            data = self._load(book)
+            if key in data["pages"]:
+                p = data["pages"][key]
+                old_orig = (p.get("orig") or "").strip()
+                if ocr.ocr_quality_ok(old_orig) or not (text or image_bytes):
+                    return NovelPageResponse(
+                        book=book,
+                        index=index,
+                        orig=p["orig"],
+                        translated=p["translated"],
+                        polished=p.get("polished"),
+                        cached=True,
+                    )
+                logger.info("第 %d 页旧 OCR 质量差, 重新识别/翻译", index)
+            prev = data["pages"].get(str(index - 1))
+            context: list[str] = []
+            if prev:
+                tail = (
+                    prev.get("polished") or prev.get("translated") or ""
+                )[-NOVEL_CONTEXT_CHARS:]
+                if tail:
+                    context.append(tail)
 
-        # 取原文: DOM 文本直接用; 否则整页竖排 OCR
+        # 锁外: OCR (若需要) + LLM, 允许多页并行
         orig = text if text is not None else ""
         from_ocr = False
         if not orig and image_bytes is not None:
-            orig = ocr.read_page(image_bytes, source_lang=source_lang, vertical=vertical)
+            orig = ocr.read_page(
+                image_bytes, source_lang=source_lang, vertical=vertical
+            )
             from_ocr = True
-        # OCR 胡话/过短不落盘, 避免导出刷屏「即便如此，」
         if from_ocr and not ocr.ocr_quality_ok(orig):
-            logger.warning("第 %d 页 OCR 质量不足, 跳过落盘: %r", index, (orig or "")[:40])
+            logger.warning(
+                "第 %d 页 OCR 质量不足, 跳过落盘: %r", index, (orig or "")[:40]
+            )
             return NovelPageResponse(
                 book=book, index=index, orig="", translated="", polished=None
             )
@@ -94,14 +121,6 @@ class NovelSession:
             return NovelPageResponse(
                 book=book, index=index, orig="", translated="", polished=None
             )
-
-        # 跨页上下文: 上一页译文末尾
-        context = []
-        prev = data["pages"].get(str(index - 1))
-        if prev:
-            tail = (prev.get("polished") or prev.get("translated") or "")[-NOVEL_CONTEXT_CHARS:]
-            if tail:
-                context.append(tail)
 
         segments = [Segment(id="pg", text=orig)]
         translated_segs, _ = self.translator.translate_batch(
@@ -111,7 +130,7 @@ class NovelSession:
             series=series,
             context=context,
             style="novel",
-            polish=False,  # 润色单独走整页, 保证段落级连贯
+            polish=False,
         )
         translated = translated_segs[0].text
 
@@ -119,13 +138,17 @@ class NovelSession:
         if polish:
             polished = self.translator.polish_text(translated, target_lang)
 
-        data["pages"][key] = {
-            "index": index,
-            "orig": orig,
-            "translated": translated,
-            "polished": polished,
-        }
-        self._save(book, data)
+        # 短锁: 合并写回 (期间其他页可能已写入)
+        with lock:
+            data = self._load(book)
+            data["target_lang"] = target_lang
+            data["pages"][key] = {
+                "index": index,
+                "orig": orig,
+                "translated": translated,
+                "polished": polished,
+            }
+            self._save(book, data)
         return NovelPageResponse(
             book=book, index=index, orig=orig, translated=translated, polished=polished
         )

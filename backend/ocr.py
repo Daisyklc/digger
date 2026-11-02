@@ -36,6 +36,8 @@ logger = logging.getLogger("WebTranslator.ocr")
 _paddle = None
 _paddle_lock = threading.Lock()
 _paddle_loading = False
+# 推理非线程安全: 并行 OCR worker 共用一把 predict 锁
+_paddle_predict_lock = threading.Lock()
 
 _manga_reader = None
 _manga_lock = threading.Lock()
@@ -194,7 +196,8 @@ def _read_with_paddle(image_bytes: bytes, vertical: bool = True) -> PostprocessR
         img = img.resize((int(w * scale), int(h * scale)))
     arr = np.asarray(img)
 
-    raw = engine.predict(arr)
+    with _paddle_predict_lock:
+        raw = engine.predict(arr)
     if not raw:
         return PostprocessResult(text="", ok=False, reason="empty_predict")
     lines = _parse_paddle_result(raw[0])

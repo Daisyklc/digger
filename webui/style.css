@@ -56,6 +56,8 @@ main {
 .hint { color: var(--muted); font-size: 12px; font-weight: normal; }
 p.hint { margin: 0 0 12px; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.row.tight { gap: 6px; }
+.row.tight select { flex: 1; min-width: 140px; }
 .row input[type="text"] { flex: 1; min-width: 200px; }
 input, select {
   padding: 8px 10px;
